@@ -30,3 +30,9 @@
 - **CP2 (Due Tue 17 Nov)**: `dbms/02_er_diagram.png` & `dbms/03_schema.sql` — ER diagram and PostgreSQL DDL schema.
 - **CP3 (Due Thu 19 Nov)**: `dbms/04_queries.sql` — Application SQL queries with relational joins and read/write annotations.
 - **CP4 (Due Mon 23 Nov)**: `dbms/05_query_timings.md` & `dbms/plans/` — 3-run timing benchmark and execution plan verification.
+
+---
+
+## ER Diagram Preview
+
+![NERRA Relational ER Diagram](dbms/02_er_diagram.png)

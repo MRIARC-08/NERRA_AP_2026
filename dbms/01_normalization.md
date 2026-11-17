@@ -1,35 +1,43 @@
-# DBMS Normalization: NERRA Data Model
+# DBMS Normalization & Dual-Database Architecture: NERRA
 
 **Team**: T0123  
 **Project**: NERRA (Intelligent Story Operating System for Novelists & Narrative Designers)  
 **Deliverable**: Checkpoint 1 (CP1) — `dbms/01_normalization.md`  
+**Course Tracker**: [DBMS Project Tracker (T0123)](https://edusatyaki.github.io/dbms-project-tracker/)
 
 ---
 
-## 1. Overview & System Context
+## 1. Executive Summary & Dual-Database Paradigm
 
-NERRA is an intelligent story operating system for authors and narrative designers. As manuscripts scale beyond 30,000+ words, writers suffer from narrative complexity collapse (timeline inconsistencies, conflicting character attributes, unresolved plot threads, broken entity relations). NERRA ingests manuscripts, parses chapters, extracts narrative entities and claims, and performs consistency checks.
+NERRA addresses the problem of **Narrative Complexity Collapse**: as long-form manuscripts exceed 30,000+ words, human memory falters under exponential character interactions, chronological anchors, object custody transfers, and epistemic state changes (who knows what when).
 
-This document presents the relational database design for NERRA's relational storage layer (PostgreSQL), taking the data model systematically through:
-1. **Unnormalized Form (UNF)**
-2. **First Normal Form (1NF)**
-3. **Second Normal Form (2NF)**
-4. **Third Normal Form (3NF)**
-5. **Boyce-Codd Normal Form (BCNF) Evaluation**
+To solve this, NERRA employs a hybrid **Dual-Database Architecture**:
+1. **Primary Relational & Vector Store (PostgreSQL 16 + `pgvector`)**:
+   - Acts as the ACID **Source of Truth (SoT)**.
+   - Houses user accounts, sovereign AI settings, manuscript drafts, chapter hashes, verbatim quote evidence, factual claims, validation staging gates, world rules, and dense vector embeddings (384-dimensional `all-MiniLM-L6-v2`) for semantic fuzzy recall.
+2. **Graph Projection & Traversal Engine (Neo4j 5 Community / Cypher)**:
+   - Projects the curated story world into a high-performance property graph.
+   - Handles multi-hop relationship evolution, epistemic knowledge propagation paths, and topological constellation visualization (via AntV G6).
+   - Designed to **gracefully degrade** to relational graph projections if Neo4j is offline or in isolated CI test environments.
+
+This document formally normalizes the **Relational Source of Truth** through **1NF, 2NF, 3NF, and BCNF**, articulates why certain multi-valued semi-structured attributes are housed in JSONB / vectors, and defines the synchronization boundary between PostgreSQL and the Neo4j graph projection.
 
 ---
 
 ## 2. Unnormalized Form (UNF)
 
-In an unnormalized architecture, a single flat log or monolithic record attempts to represent all user operations, projects, manuscripts, extracted narrative entities, and issues.
+In an unnormalized monolithic design, an author's complete manuscript extraction and analysis session would be stored as an unconstrained, deeply nested hierarchical document.
 
-### Universal Relation Schema: `UNF_NARRATIVE_RECORD`
-```
-UNF_NARRATIVE_RECORD (
+### Universal Relation: `UNF_MANUSCRIPT_SESSION`
+
+```text
+UNF_MANUSCRIPT_SESSION (
     user_id,
     user_email,
     user_password_hash,
-    user_display_name,
+    display_name,
+    anthropic_api_key,
+    primary_model,
     project_id,
     project_title,
     project_genre,
@@ -40,280 +48,324 @@ UNF_NARRATIVE_RECORD (
     chapters_done,
     chapters_total,
     chapter_analyses: [
-        { chapter_number, content_hash, result_json }
+        { chapter_number, content_hash, raw_extraction_json }
+    ],
+    chunks: [
+        { chapter_number, content, content_hash, paragraph_hashes, embedding_vector }
     ],
     characters: [
-        { name, aliases: [...], status, physical_traits: {...}, first_chapter, last_chapter }
+        { character_name, aliases: [...], description, status, physical_traits: {...}, first_chapter, last_chapter }
+    ],
+    relationships: [
+        { character_a_name, character_b_name, rel_type, sentiment, evidence_quote, chapter, until_chapter }
     ],
     locations: [
-        { name, description, first_chapter }
+        { location_name, description, first_chapter }
     ],
     objects: [
-        { name, description, first_chapter, mention_chapters: [...] }
+        { object_name, description, first_chapter, mention_chapters: [...] }
+    ],
+    object_custody_events: [
+        { object_name, chapter, holder_type, holder_name, action, evidence_quote }
     ],
     events: [
-        { chapter_number, scene_order, story_time_order, temporal_anchor, summary, participants: [...] }
+        { chapter_number, scene_order, story_time_order, temporal_anchor, is_flashback, summary, participants: [...], location }
     ],
     claims: [
-        { subject, attribute, value, chapter, evidence_quote, status }
+        { subject, attribute, value, chapter, evidence_quote, confidence, validation_state, status }
+    ],
+    knowledge_updates: [
+        { character, fact, chapter, how_learned, source_character }
+    ],
+    validation_candidates: [
+        { candidate_type, chapter, payload, confidence, route, status }
     ],
     issues: [
-        { issue_type, severity, description, status, claim_a_id, claim_b_id }
+        { issue_type, severity, description, ai_reasoning, intent_classification, claim_a_subject, claim_a_value, claim_b_value }
+    ],
+    plot_threads: [
+        { thread_title, description, setup_chapter, payoff_chapter, thread_status, related_entities: [...] }
     ]
 )
 ```
 
-### Anomalies in UNF:
-* **Repeating Groups / Multi-valued Attributes**: Arrays of characters, chapters, claims, objects, and nested extraction results violate atomicity.
-* **Insertion Anomaly**: Cannot create a `User` without creating a `Project`, `Manuscript`, and `Character`.
-* **Update Anomaly**: If a character's description or name changes, it must be updated in thousands of embedded rows.
-* **Deletion Anomaly**: Deleting a manuscript inadvertently destroys author settings or character identities.
+### Critical Anomalies in UNF:
+1. **Repeating Groups & Non-Atomic Data**: Repeated arrays of chapters, characters, claims, and timeline scenes violate atomicity.
+2. **Insertion Anomalies**: An author cannot register or save sovereign LLM API key overrides without creating a manuscript and extracting entities.
+3. **Update Anomalies**: If a character's physical trait (e.g. hair color) is updated, every denormalized record referencing that chapter or event must be redundantly modified.
+4. **Deletion Anomalies**: Deleting a discarded manuscript draft unintentionally erases the author's world-building rules or character profile registry.
 
 ---
 
 ## 3. First Normal Form (1NF)
 
-### Rules for 1NF:
-1. Each column must contain atomic (indivisible) values.
-2. No repeating groups or nested relation arrays.
-3. A unique primary key exists for every relation.
+### Formal Requirements for 1NF:
+1. All attributes must be atomic (no non-scalar repeating groups or nested tables).
+2. Every relation must possess a uniquely identifiable primary key.
+3. No duplicate rows.
 
-### Flattening Repeating Groups into 1NF Tables:
+### Normalization Process (UNF &rarr; 1NF):
+All nested collections (analyses, chunks, characters, relationships, claims, timeline events, custody records, and issues) are extracted into distinct relational tables with unique surrogate primary keys (`UUID` / `uuid-ossp`) and foreign keys referencing parent entities.
 
-To achieve 1NF, every nested array (characters, claims, events, objects, etc.) is extracted into distinct tabular relations, and multi-valued attributes (like aliases, mention chapters, participants) are converted into scalar foreign-key references or individual relational junction rows.
+#### Relational Entities in 1NF:
 
-#### Table 1: `Users_1NF`
-* `(user_id, email, password_hash, display_name, created_at)`
-* **Primary Key**: `user_id`
+1. **`users_1nf`**:
+   - `(id, email, password_hash, display_name, created_at)`
+   - **Primary Key**: `{id}`
+   - **Candidate Key**: `{email}`
 
-#### Table 2: `Projects_1NF`
-* `(project_id, owner_id, title, genre, created_at)`
-* **Primary Key**: `project_id`
+2. **`user_sessions_1nf`**:
+   - `(id, user_id, refresh_token_hash, user_agent, ip_address, is_revoked, expires_at, created_at, last_active_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 3: `Manuscripts_1NF`
-* `(manuscript_id, project_id, title, raw_text, status, chapters_done, chapters_total, error_note, created_at)`
-* **Primary Key**: `manuscript_id`
+3. **`user_settings_1nf`**:
+   - `(id, user_id, anthropic_api_key, anthropic_base_url, primary_model, embedding_model, max_hop_depth, extra_config, updated_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 4: `ChapterAnalyses_1NF`
-* `(analysis_id, manuscript_id, chapter_number, content_hash, raw_payload, created_at)`
-* **Primary Key**: `analysis_id`
+4. **`projects_1nf`**:
+   - `(id, owner_id, title, genre, created_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 5: `Characters_1NF`
-* `(character_id, project_id, name, description, status, first_chapter, last_chapter, created_at)`
-* **Primary Key**: `character_id`
+5. **`manuscripts_1nf`**:
+   - `(id, project_id, title, raw_text, status, chapters_done, chapters_total, error_note, created_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 6: `CharacterAliases_1NF`
-* `(alias_id, character_id, alias_name)`
-* **Primary Key**: `alias_id` (or composite `(character_id, alias_name)`)
+6. **`chapter_analyses_1nf`**:
+   - `(id, manuscript_id, chapter_number, content_hash, result, created_at)`
+   - **Primary Key**: `{id}`
+   - **Candidate Key**: `{manuscript_id, chapter_number, content_hash}`
 
-#### Table 7: `Locations_1NF`
-* `(location_id, project_id, name, description, first_chapter)`
-* **Primary Key**: `location_id`
+7. **`chunks_1nf`**:
+   - `(id, manuscript_id, chapter_number, content, content_hash, paragraph_hashes, embedding, created_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 8: `Objects_1NF`
-* `(object_id, project_id, name, description, first_chapter)`
-* **Primary Key**: `object_id`
+8. **`characters_1nf`**:
+   - `(id, project_id, name, description, status, physical_traits, first_chapter, last_chapter, created_at)`
+   - **Primary Key**: `{id}`
 
-#### Table 9: `ObjectMentions_1NF`
-* `(object_id, chapter_number)`
-* **Primary Key**: `(object_id, chapter_number)`
+9. **`character_aliases_1nf`**:
+   - `(id, character_id, alias_name)`
+   - **Primary Key**: `{id}`
 
-#### Table 10: `Relationships_1NF`
-* `(relationship_id, project_id, character_a_id, character_b_id, rel_type, sentiment, description, evidence_quote, chapter, until_chapter)`
-* **Primary Key**: `relationship_id`
+10. **`relationships_1nf`**:
+    - `(id, project_id, character_a_id, character_b_id, type, sentiment, description, evidence_quote, chapter, until_chapter, created_at)`
+    - **Primary Key**: `{id}`
 
-#### Table 11: `Events_1NF`
-* `(event_id, project_id, chapter_number, scene_order, story_time_order, temporal_anchor, is_flashback, is_flashforward, summary, location_name, created_at)`
-* **Primary Key**: `event_id`
+11. **`locations_1nf`**:
+    - `(id, project_id, name, description, first_chapter, created_at)`
+    - **Primary Key**: `{id}`
 
-#### Table 12: `EventParticipants_1NF`
-* `(event_id, character_id)`
-* **Primary Key**: `(event_id, character_id)`
+12. **`objects_1nf`**:
+    - `(id, project_id, name, description, first_chapter, created_at)`
+    - **Primary Key**: `{id}`
 
-#### Table 13: `Claims_1NF`
-* `(claim_id, project_id, subject_id, attribute_name, claim_value, chapter, evidence_quote, source_paragraph_id, confidence, validation_state, status, created_at)`
-* **Primary Key**: `claim_id`
+13. **`object_mentions_1nf`**:
+    - `(id, object_id, chapter_number)`
+    - **Primary Key**: `{id}`
 
-#### Table 14: `KnowledgeUpdates_1NF`
-* `(update_id, project_id, character_id, fact_text, chapter, how_learned, source_character_id)`
-* **Primary Key**: `update_id`
+14. **`object_custody_events_1nf`**:
+    - `(id, project_id, object_id, chapter, holder_type, holder_name, action, evidence_quote, created_at)`
+    - **Primary Key**: `{id}`
 
-#### Table 15: `Issues_1NF`
-* `(issue_id, project_id, issue_type, severity, status, description, confidence, ai_reasoning, intent_classification, claim_a_id, claim_b_id, created_at)`
-* **Primary Key**: `issue_id`
+15. **`events_1nf`**:
+    - `(id, project_id, chapter_number, scene_order, story_time_order, temporal_anchor, is_flashback, is_flashforward, summary, location, created_at)`
+    - **Primary Key**: `{id}`
 
-#### Table 16: `PlotThreads_1NF`
-* `(thread_id, project_id, title, description, setup_chapter, payoff_chapter, status, evidence_quote, updated_at)`
-* **Primary Key**: `thread_id`
+16. **`event_participants_1nf`**:
+    - `(id, event_id, character_id)`
+    - **Primary Key**: `{id}`
+
+17. **`claims_1nf`**:
+    - `(id, project_id, subject, attribute, value, chapter, evidence_quote, source_paragraph_id, extraction_version, confidence, validation_state, status, created_at)`
+    - **Primary Key**: `{id}`
+
+18. **`knowledge_updates_1nf`**:
+    - `(id, project_id, character, fact, chapter, how_learned, source_character, created_at)`
+    - **Primary Key**: `{id}`
+
+19. **`validation_candidates_1nf`**:
+    - `(id, project_id, manuscript_id, chapter, candidate_type, payload, confidence, route, ambiguity_reason, source_paragraph_id, evidence_quote, status, created_at)`
+    - **Primary Key**: `{id}`
+
+20. **`world_rules_1nf`**:
+    - `(id, project_id, category, rule_text, source_chapter, is_author_defined, status, created_at)`
+    - **Primary Key**: `{id}`
+
+21. **`issues_1nf`**:
+    - `(id, project_id, type, severity, status, description, evidence, confidence, ai_reasoning, intent_classification, related_entities, claim_a_id, claim_b_id, created_at)`
+    - **Primary Key**: `{id}`
+
+22. **`plot_threads_1nf`**:
+    - `(id, project_id, title, description, setup_chapter, payoff_chapter, status, related_entities, evidence_quote, updated_at)`
+    - **Primary Key**: `{id}`
+
+23. **`manuscript_versions_1nf`**:
+    - `(id, project_id, manuscript_id, version_number, content_hash, raw_text, diff_summary, created_at)`
+    - **Primary Key**: `{id}`
 
 ---
 
 ## 4. Second Normal Form (2NF)
 
-### Rules for 2NF:
-1. Must be in 1NF.
-2. No partial functional dependencies: every non-prime attribute must depend on the **whole candidate key** (no non-prime attribute can depend on a proper subset of a composite primary key).
+### Formal Requirements for 2NF:
+1. The relation must satisfy 1NF.
+2. **No Partial Functional Dependencies**: Every non-prime attribute must be fully functionally dependent on the entire primary key. No non-prime attribute can depend on a proper subset of any candidate key.
 
-### Functional Dependency & Partial Dependency Analysis:
+### Analysis of Candidate Keys & Functional Dependencies:
 
-Let us examine relations with composite candidate keys in 1NF:
+In our 1NF relational schema, each table utilizes an explicit surrogate primary key `id: UUID`. Where natural composite keys exist (such as in junction tables or analysis cache lookup keys), we evaluate whether partial dependencies can emerge:
 
-#### 1. Relation `EventParticipants_1NF`:
-* Composite Key: `{event_id, character_id}`
-* Non-prime attributes: None (pure junction table).
-* Dependencies:
-  * `{event_id, character_id} -> None`
-* **Result**: Satisfies 2NF.
+#### Case 1: `chapter_analyses`
+- **Candidate Keys**:
+  - Surrogate Key: `{id}`
+  - Natural Composite Key: `{manuscript_id, chapter_number, content_hash}`
+- **Functional Dependencies**:
+  - `{id} -> {manuscript_id, chapter_number, content_hash, result, created_at}`
+  - `{manuscript_id, chapter_number, content_hash} -> {result, created_at}`
+- **Evaluation**: The payload `result` and timestamp `created_at` depend on the specific analyzed chapter text content hash. Neither `manuscript_id` alone nor `{manuscript_id, chapter_number}` determines `result` (since chapter content evolves across drafts). Hence, all non-prime attributes depend on the **whole** composite key. **No partial dependencies exist.**
 
-#### 2. Relation `ObjectMentions_1NF`:
-* Composite Key: `{object_id, chapter_number}`
-* Non-prime attributes: None.
-* Dependencies:
-  * `{object_id, chapter_number} -> None`
-* **Result**: Satisfies 2NF.
+#### Case 2: `event_participants` & `object_mentions`
+- Composite Keys: `{event_id, character_id}` and `{object_id, chapter_number}`.
+- Attributes are solely foreign key pairings linking distinct entities. There are no dangling non-prime attributes dependent on only one component of the key.
 
-#### 3. Relation with potential partial dependency violation (hypothetical pre-2NF `ChapterAnalyses`):
-If `ChapterAnalyses` was keyed by `(manuscript_id, chapter_number)` and stored `manuscript_title`:
-* Composite Key: `{manuscript_id, chapter_number}`
-* Dependency: `manuscript_id -> manuscript_title` (Partial dependency on subset of key!)
-* **Resolution**: Decompose into `Manuscripts` (where `manuscript_id -> manuscript_title`) and `ChapterAnalyses` (keyed by surrogate `analysis_id` or `{manuscript_id, chapter_number}`). In our schema, `manuscript_title` lives exclusively in `Manuscripts`.
+#### Case 3: Elimination of Hypothetical Partial Dependencies:
+If the analysis cache had been modeled as:
+`CHAPTER_CACHE(manuscript_id, chapter_number, manuscript_title, chapter_analysis)`
+Here, `{manuscript_id, chapter_number}` would be the primary key, but:
+`manuscript_id -> manuscript_title`
+This would be a classic partial dependency violation. We resolved this by keeping `manuscript_title` strictly inside the `manuscripts` table.
 
-#### 4. Relation `Claims`:
-* Candidate Key: `{claim_id}` (surrogate key) or natural key `{project_id, subject_id, attribute_name, chapter}`.
-* Since all entities have single-attribute primary keys (`UUID` surrogate keys) and junction tables have only key attributes, **no partial dependency exists**.
-
-Every table satisfies 2NF.
+**Conclusion**: All relations satisfy 2NF.
 
 ---
 
 ## 5. Third Normal Form (3NF)
 
-### Rules for 3NF:
-1. Must be in 2NF.
-2. No transitive dependencies: no non-prime attribute may depend functionally on another non-prime attribute ($X \to Y$ where $X$ is not a superkey).
+### Formal Requirements for 3NF:
+1. The relation must satisfy 2NF.
+2. **No Transitive Dependencies**: For every non-trivial functional dependency $X \to Y$, either:
+   - $X$ is a superkey, or
+   - $Y$ is a prime attribute (part of a candidate key).
+   In other words, non-prime attributes must not depend on other non-prime attributes ($A \to B \to C$).
 
-### Identifying and Eliminating Transitive Dependencies:
+### Identification & Elimination of Transitive Dependencies:
 
-#### Issue Case: Entity Ownership via Project vs. User
-Consider an un-decomposed claim or manuscript entity:
-* `(claim_id, project_id, owner_id, owner_email, subject, attribute, value)`
-* Dependency:
-  * `claim_id -> project_id`
-  * `project_id -> owner_id`
-  * `owner_id -> owner_email`
-* `owner_email` is transitively dependent on `claim_id` via `owner_id`.
-* **3NF Resolution**:
-  * Extract `Users(user_id, email, password_hash, display_name)`.
-  * Extract `Projects(project_id, owner_id, title, genre)`.
-  * `Claims` references only `project_id`. The user details are reached via foreign key joins `Claims -> Projects -> Users`.
+#### 1. Transitive Dependency: Author Profile in Project Records
+- **Violation in Denormalized Schema**:
+  - `PROJECTS(project_id, project_title, user_id, user_email, user_display_name)`
+  - FDs: `project_id -> user_id`, `user_id -> {user_email, user_display_name}`
+  - Here, `user_email` and `user_display_name` are transitively dependent on `project_id` via `user_id`.
+- **3NF Decomposition**:
+  - `users(id, email, password_hash, display_name, created_at)`
+  - `projects(id, owner_id, title, genre, created_at)`
+  - `projects.owner_id` references `users.id`. Author details are retrieved via relational joins.
 
-#### Issue Case: Conflict/Issue Claim Details
-Suppose `Issues` contained:
-* `(issue_id, project_id, claim_a_id, claim_a_subject, claim_a_attribute, claim_a_value, claim_b_id, claim_b_value)`
-* Dependency:
-  * `issue_id -> claim_a_id`
-  * `claim_a_id -> {claim_a_subject, claim_a_attribute, claim_a_value}`
-* This is a transitive dependency ($issue\_id \to claim\_a\_id \to attributes$).
-* **3NF Resolution**:
-  * Store only foreign keys `claim_a_id` and `claim_b_id` in `Issues`.
-  * The actual claim attributes are fetched via relational joins from `Claims(claim_id, ...)`.
+#### 2. Transitive Dependency: Story Issue & Contradictory Claims
+- **Violation in Denormalized Schema**:
+  - `ISSUES(issue_id, project_id, claim_a_id, claim_a_subject, claim_a_attribute, claim_a_val, claim_b_id, claim_b_val)`
+  - FDs: `issue_id -> {claim_a_id, claim_b_id}`, `claim_a_id -> {claim_a_subject, claim_a_attribute, claim_a_val}`
+  - Claim values are transitively dependent on `issue_id` via `claim_a_id`.
+- **3NF Decomposition**:
+  - `claims(id, project_id, subject, attribute, value, chapter, evidence_quote, ...)`
+  - `issues(id, project_id, type, severity, status, description, claim_a_id, claim_b_id, ...)`
+  - `claim_a_id` and `claim_b_id` are foreign keys to `claims.id`.
 
-#### Issue Case: Location & Character in Events
-Suppose `Events` contained:
-* `(event_id, location_id, location_name, location_description, summary)`
-* Dependency:
-  * `event_id -> location_id`
-  * `location_id -> {location_name, location_description}`
-* **3NF Resolution**:
-  * Extract `Locations(location_id, project_id, name, description, first_chapter)`.
-  * Store `location_id` in `Events`.
+#### 3. Transitive Dependency: Object Custody Location
+- **Violation in Denormalized Schema**:
+  - `CUSTODY(custody_id, object_id, location_id, location_name, location_description)`
+  - FDs: `custody_id -> location_id`, `location_id -> {location_name, location_description}`
+- **3NF Decomposition**:
+  - `locations(id, project_id, name, description, first_chapter)`
+  - `object_custody_events(id, project_id, object_id, chapter, holder_type, holder_name, action, evidence_quote)`
 
 ---
 
 ## 6. Boyce-Codd Normal Form (BCNF) Evaluation
 
-### Definition of BCNF:
-A relation $R$ is in BCNF if and only if for every non-trivial functional dependency $X \to Y$, $X$ is a **superkey** of $R$.
+### Formal Definition:
+A relation $R$ is in **BCNF** if and only if for every non-trivial functional dependency $X \to Y$, $X$ is a **superkey** (contains a candidate key of $R$).
 
-### Evaluation of Core NERRA Tables:
+### Table-by-Table Verification:
 
-1. **`Users`**:
-   * Functional Dependencies:
-     * `user_id -> email, password_hash, display_name, created_at`
-     * `email -> user_id, password_hash, display_name, created_at`
-   * Both `user_id` and `email` are candidate keys (superkeys).
-   * **In BCNF**: Yes.
+| Table | Candidate Keys | Functional Dependencies ($X \to Y$) | Is $X$ a Superkey? | In BCNF? |
+|:---|:---|:---|:---:|:---:|
+| `users` | `{id}`, `{email}` | `id -> email, password_hash, display_name`<br>`email -> id, password_hash, display_name` | Yes | **Yes** |
+| `user_sessions` | `{id}`, `{refresh_token_hash}` | `id -> all attributes`<br>`refresh_token_hash -> all attributes` | Yes | **Yes** |
+| `user_settings` | `{id}`, `{user_id}` | `id -> all attributes`<br>`user_id -> all attributes` | Yes | **Yes** |
+| `projects` | `{id}` | `id -> owner_id, title, genre, created_at` | Yes | **Yes** |
+| `manuscripts` | `{id}` | `id -> project_id, title, raw_text, status, ...` | Yes | **Yes** |
+| `chapter_analyses` | `{id}`, `{manuscript_id, chapter_number, content_hash}` | `id -> all attributes`<br>`{manuscript_id, ch, hash} -> id, result, created_at` | Yes | **Yes** |
+| `chunks` | `{id}` | `id -> manuscript_id, chapter_number, content, embedding, ...` | Yes | **Yes** |
+| `characters` | `{id}` | `id -> project_id, name, description, status, ...` | Yes | **Yes** |
+| `relationships` | `{id}` | `id -> project_id, character_a_id, character_b_id, type, ...` | Yes | **Yes** |
+| `claims` | `{id}` | `id -> project_id, subject, attribute, value, chapter, ...` | Yes | **Yes** |
+| `issues` | `{id}` | `id -> project_id, type, severity, status, claim_a_id, ...` | Yes | **Yes** |
+| `validation_candidates` | `{id}` | `id -> project_id, candidate_type, payload, route, ...` | Yes | **Yes** |
+| `world_rules` | `{id}` | `id -> project_id, category, rule_text, ...` | Yes | **Yes** |
 
-2. **`Projects`**:
-   * Functional Dependencies:
-     * `project_id -> owner_id, title, genre, created_at`
-   * Determinant `project_id` is candidate key.
-   * **In BCNF**: Yes.
-
-3. **`Manuscripts`**:
-   * Functional Dependencies:
-     * `manuscript_id -> project_id, title, raw_text, status, chapters_done, chapters_total, created_at`
-   * Determinant `manuscript_id` is candidate key.
-   * **In BCNF**: Yes.
-
-4. **`Characters`**:
-   * Functional Dependencies:
-     * `character_id -> project_id, name, description, status, first_chapter, last_chapter, created_at`
-   * Determinant `character_id` is candidate key.
-   * **In BCNF**: Yes.
-
-5. **`Relationships`**:
-   * Functional Dependencies:
-     * `relationship_id -> project_id, character_a_id, character_b_id, type, sentiment, description, evidence_quote, chapter, until_chapter`
-   * Determinant `relationship_id` is candidate key.
-   * **In BCNF**: Yes.
-
-6. **`Claims`**:
-   * Functional Dependencies:
-     * `claim_id -> project_id, subject, attribute, value, chapter, evidence_quote, source_paragraph_id, confidence, validation_state, status, created_at`
-   * Determinant `claim_id` is candidate key.
-   * **In BCNF**: Yes.
-
-7. **`Issues`**:
-   * Functional Dependencies:
-     * `issue_id -> project_id, type, severity, status, description, confidence, ai_reasoning, intent_classification, claim_a_id, claim_b_id, created_at`
-   * Determinant `issue_id` is candidate key.
-   * **In BCNF**: Yes.
-
-### Summary:
-All relation schemas in the final design satisfy 3NF and BCNF because all functional dependencies have a superkey on the left-hand side. There are no non-trivial dependencies on non-superkeys.
+Because every functional determinant in our relational tables is a superkey, **the schema strictly conforms to BCNF**.
 
 ---
 
-## 7. Final Normalized Relational Schema Summary
+## 7. Justification of Semi-Structured & Vector Types in Modern RDBMS
 
-| Table Name | Primary Key | Foreign Keys | Normal Form | Purpose |
-|:---|:---|:---|:---:|:---|
-| `users` | `id` | None | BCNF | Author credentials and profiles |
-| `user_sessions` | `id` | `user_id -> users(id)` | BCNF | Auth tokens, active sessions |
-| `user_settings` | `id` | `user_id -> users(id)` | BCNF | Sovereign AI API keys & settings |
-| `projects` | `id` | `owner_id -> users(id)` | BCNF | Story projects/novels |
-| `manuscripts` | `id` | `project_id -> projects(id)` | BCNF | Manuscript documents and ingest state |
-| `chapter_analyses` | `id` | `manuscript_id -> manuscripts(id)` | BCNF | Chapter level extraction caches |
-| `chunks` | `id` | `manuscript_id -> manuscripts(id)` | BCNF | Text chunks & vector embeddings |
-| `characters` | `id` | `project_id -> projects(id)` | BCNF | Extracted characters |
-| `character_aliases` | `id` | `character_id -> characters(id)` | BCNF | 1NF/3NF atomic character aliases |
-| `relationships` | `id` | `character_a_id -> characters(id)`, `character_b_id -> characters(id)` | BCNF | Inter-character relationships & sentiment |
-| `locations` | `id` | `project_id -> projects(id)` | BCNF | Story world geographic locations |
-| `objects` | `id` | `project_id -> projects(id)` | BCNF | Key story artifacts and items |
-| `object_custody_events` | `id` | `object_id -> objects(id)` | BCNF | Custody timeline for props/artifacts |
-| `events` | `id` | `project_id -> projects(id)` | BCNF | Timeline plot scenes and chronology |
-| `claims` | `id` | `project_id -> projects(id)` | BCNF | Discrete narrative assertions (facts) |
-| `knowledge_updates` | `id` | `project_id -> projects(id)` | BCNF | Epistemic state (who knows what when) |
-| `issues` | `id` | `claim_a_id -> claims(id)`, `claim_b_id -> claims(id)` | BCNF | Consistency violations & contradictions |
-| `plot_threads` | `id` | `project_id -> projects(id)` | BCNF | Arcs, setup, and payoff resolutions |
+PostgreSQL 16 supports `JSONB` and native `VECTOR` datatypes. It is important to clarify why certain attributes are retained in `JSONB` or `VECTOR` rather than being shredded into millions of relational tuples:
+
+1. **`chunks.embedding VECTOR(384)`**:
+   - High-dimensional vector embeddings are atomic mathematical representations (points in $\mathbb{R}^{384}$).
+   - PostgreSQL `pgvector` indexing (HNSW / IVFFlat) provides cosine similarity search directly within SQL transactions.
+2. **`characters.physical_traits JSONB`** & **`characters.aliases JSONB`**:
+   - Physical traits vary wildly by genre (e.g. `eye_color`, `scars`, `cybernetic_implants`, `magic_core`). Storing dynamic key-value pairs in JSONB avoids wide sparse tables or EAV (Entity-Attribute-Value) anti-patterns while retaining GIN indexability.
+3. **`chapter_analyses.result JSONB`**:
+   - Raw LLM extraction payloads serve as an immutable audit trail and extraction cache. Once parsed, canonical narrative assertions are promoted to first-class relational tables (`characters`, `claims`, `events`).
 
 ---
 
-## 8. Conclusion
+## 8. Dual-Database Architecture & Graph Projection Synchronization
 
-By completing 1NF, 2NF, 3NF, and BCNF normalization:
-- **Redundancy is minimized**: Eliminating duplicate author, manuscript, and entity data across chapters.
-- **Data integrity is guaranteed**: Foreign key constraints and unique constraints prevent orphaned narrative facts.
-- **Anomalies are eliminated**: Authors can freely update character details or delete draft revisions without corrupting canon data.
-- **Performance is optimized**: Smaller tuple footprints allow high-speed index scans and efficient joins in PostgreSQL.
+The relational tables above serve as the **authoritative system of record**. The graph database (Neo4j) provides an operational projection for network traversals.
+
+```
+                    ┌────────────────────────────────────────┐
+                    │       PostgreSQL 16 + pgvector         │
+                    │         (Source of Truth)              │
+                    │  • Users, Projects, Manuscripts        │
+                    │  • Canonical Claims & Issues           │
+                    │  • Raw Chunks & Vector Embeddings      │
+                    └───────────────────┬────────────────────┘
+                                        │
+                         Projection / Transactional Sync
+                         (app/services/graph.py)
+                                        │
+                                        ▼
+                    ┌────────────────────────────────────────┐
+                    │            Neo4j 5 Graph DB            │
+                    │         (Traversals & RAG)             │
+                    │  • Multi-hop Graph Traversal (Cypher)  │
+                    │  • Epistemic Knowledge Paths           │
+                    │  • AntV G6 Interactive Constellation   │
+                    └────────────────────────────────────────┘
+```
+
+### Relational to Graph Mapping Matrix:
+
+| Relational Table (PostgreSQL) | Graph Element (Neo4j) | Properties & Cypher Semantics |
+|:---|:---|:---|
+| `characters` | `(:StoryEntity {kind: 'character'})` | `id`, `label`, `status`, `first_chapter`, `last_chapter` |
+| `locations` | `(:StoryEntity {kind: 'location'})` | `id`, `label`, `description` |
+| `objects` | `(:StoryEntity {kind: 'object'})` | `id`, `label`, `mention_chapters` |
+| `relationships` | `(a)-[:RELATIONSHIP]->(b)` | `type`, `sentiment`, `evidence_quote`, `chapter`, `until_chapter` |
+| `events` | `(:StoryEntity {kind: 'event'})` | `chapter_number`, `scene_order`, `story_time_order`, `summary` |
+| `event_participants` | `(char)-[:PARTICIPATED_IN]->(event)` | `role`, `chapter` |
+| `events` &rarr; `locations` | `(event)-[:OCCURRED_AT]->(location)` | `since_chapter` |
+| `plot_threads` | `(:StoryEntity {kind: 'thread'})` | `title`, `setup_chapter`, `payoff_chapter`, `status` |
+| `claims` (contradictions) | `(claim_a)-[:CONTRADICTS]->(claim_b)` | `issue_id`, `severity` |
+
+---
+
+## 9. Conclusion
+
+By executing 1NF, 2NF, 3NF, and BCNF normalization:
+- **Redundancies are eliminated**: No duplicated manuscript text, author metadata, or claim citations.
+- **ACID Guarantees**: Transactional consistency prevents orphaned issues, phantom claims, or inconsistent character references.
+- **Architectural Harmony**: PostgreSQL delivers hardened transactional integrity and vector similarity search, while Neo4j executes recursive Cypher traversals and real-time narrative constellation visualizations.

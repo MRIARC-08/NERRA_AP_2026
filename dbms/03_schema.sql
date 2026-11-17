@@ -1,5 +1,5 @@
 -- ============================================================================
--- NERRA Relational Database Schema (PostgreSQL)
+-- NERRA Production Relational Schema (PostgreSQL 16 + pgvector)
 -- Team: T0123 | Project: NERRA
 -- Deliverable: CP2 - dbms/03_schema.sql
 -- ============================================================================
@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector";
 
 -- ---------------------------------------------------------------------------
--- 1. IDENTITY & USER MANAGEMENT
+-- 1. IDENTITY & SOVEREIGN USER SETTINGS
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE users (
@@ -49,7 +49,7 @@ CREATE TABLE user_settings (
 );
 
 -- ---------------------------------------------------------------------------
--- 2. PROJECTS & MANUSCRIPTS
+-- 2. PROJECTS & MANUSCRIPT VERSIONING
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE projects (
@@ -75,6 +75,19 @@ CREATE TABLE manuscripts (
 );
 
 CREATE INDEX idx_manuscripts_project_id ON manuscripts(project_id);
+
+CREATE TABLE manuscript_versions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    manuscript_id UUID NOT NULL REFERENCES manuscripts(id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL DEFAULT 1,
+    content_hash VARCHAR(64) NOT NULL,
+    raw_text TEXT NOT NULL,
+    diff_summary JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_manuscript_versions_doc ON manuscript_versions(manuscript_id, version_number);
 
 CREATE TABLE chapter_analyses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -102,7 +115,7 @@ CREATE TABLE chunks (
 CREATE INDEX idx_chunks_manuscript_chapter ON chunks(manuscript_id, chapter_number);
 
 -- ---------------------------------------------------------------------------
--- 3. STORY WORLD ENTITIES
+-- 3. STORY WORLD CANONICAL ENTITIES
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE characters (
@@ -195,7 +208,7 @@ CREATE INDEX idx_events_project ON events(project_id);
 CREATE INDEX idx_events_timeline ON events(project_id, story_time_order);
 
 -- ---------------------------------------------------------------------------
--- 4. CLAIMS, KNOWLEDGE & CONSISTENCY ISSUES
+-- 4. CLAIMS, VALIDATION GATE & CONSISTENCY ISSUES
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE claims (
@@ -217,6 +230,24 @@ CREATE TABLE claims (
 CREATE INDEX idx_claims_project ON claims(project_id);
 CREATE INDEX idx_claims_subject_attr ON claims(project_id, subject, attribute);
 
+CREATE TABLE validation_candidates (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    manuscript_id UUID REFERENCES manuscripts(id) ON DELETE CASCADE,
+    chapter INTEGER NOT NULL,
+    candidate_type VARCHAR(50) NOT NULL, -- character | alias | claim | relationship | location
+    payload JSONB DEFAULT '{}'::jsonb,
+    confidence REAL DEFAULT 0.7,
+    route VARCHAR(50) DEFAULT 'human_review', -- auto_accepted | human_review | reject_hold
+    ambiguity_reason TEXT,
+    source_paragraph_id VARCHAR(50),
+    evidence_quote TEXT,
+    status VARCHAR(50) DEFAULT 'pending',     -- pending | approved | rejected | merged | split
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_validation_candidates_route ON validation_candidates(project_id, route, status);
+
 CREATE TABLE knowledge_updates (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -230,6 +261,19 @@ CREATE TABLE knowledge_updates (
 
 CREATE INDEX idx_knowledge_project ON knowledge_updates(project_id);
 CREATE INDEX idx_knowledge_char ON knowledge_updates(project_id, character);
+
+CREATE TABLE world_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category VARCHAR(50) DEFAULT 'setting', -- magic | physics | society | setting
+    rule_text TEXT NOT NULL,
+    source_chapter INTEGER,
+    is_author_defined BOOLEAN DEFAULT TRUE,
+    status VARCHAR(50) DEFAULT 'active',    -- active | deprecated
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_world_rules_project ON world_rules(project_id);
 
 CREATE TABLE issues (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -251,6 +295,19 @@ CREATE TABLE issues (
 CREATE INDEX idx_issues_project ON issues(project_id);
 CREATE INDEX idx_issues_status ON issues(project_id, status);
 
+CREATE TABLE correction_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    rule_type VARCHAR(100) NOT NULL, -- alias_merge | entity_split | character_rename | fact_override | plot_status
+    target_entity VARCHAR(255) NOT NULL,
+    instruction_text TEXT NOT NULL,
+    payload JSONB DEFAULT '{}'::jsonb,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_correction_rules_project ON correction_rules(project_id, active);
+
 CREATE TABLE plot_threads (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -265,3 +322,14 @@ CREATE TABLE plot_threads (
 );
 
 CREATE INDEX idx_plot_threads_project ON plot_threads(project_id);
+
+CREATE TABLE project_customizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+    custom_context TEXT,
+    custom_prompt TEXT,
+    custom_validation JSONB DEFAULT '{}'::jsonb,
+    custom_graph_write JSONB DEFAULT '{}'::jsonb,
+    custom_ui_config JSONB DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

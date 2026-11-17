@@ -230,6 +230,11 @@ CREATE TABLE claims (
 CREATE INDEX idx_claims_project ON claims(project_id);
 CREATE INDEX idx_claims_subject_attr ON claims(project_id, subject, attribute);
 
+-- Index for Q12 functional expression comparisons on subject and attribute
+CREATE INDEX idx_claims_project_subject_attr_lower
+    ON claims (project_id, LOWER(subject), LOWER(attribute));
+
+
 CREATE TABLE validation_candidates (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
